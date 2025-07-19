@@ -105,7 +105,7 @@ func main() {
 		go func(ch chan<- [][]string, finished chan<- bool, i int, okwords []Word) {
 			j := i
 			for j < len(okwords) {
-				data := finishwordlist(j, okwords)
+				data := finishWordList(j, okwords)
 				ch <- data
 				finished <- false
 				j += threads
@@ -182,59 +182,75 @@ func main() {
 	}
 }
 
-func finishwordlist(index int, okwords []Word) [][]string {
+func finishWordList(index int, okwords []Word) [][]string {
 	wordlist := []Word{
 		okwords[index],
 	}
+	var addedLetters map[rune]bool
+	addedLetters = addLetters(addedLetters, wordlist[0].Letters)
 	var foundcombinations [][]string
 	for _, word2 := range okwords {
-		if !addable(word2, wordlist) {
+		if !addable(word2, wordlist[len(wordlist)-1], addedLetters) {
 			continue
 		}
+		addedLetters = addLetters(addedLetters, word2.Letters)
 		wordlist = append(wordlist, word2)
 		for _, word3 := range okwords {
-			if !addable(word3, wordlist) {
+			if !addable(word3, wordlist[len(wordlist)-1], addedLetters) {
 				continue
 			}
+			addedLetters = addLetters(addedLetters, word3.Letters)
 			wordlist = append(wordlist, word3)
 			for _, word4 := range okwords {
-				if !addable(word4, wordlist) {
+				if !addable(word4, wordlist[len(wordlist)-1], addedLetters) {
 					continue
 				}
+				addedLetters = addLetters(addedLetters, word4.Letters)
 				wordlist = append(wordlist, word4)
 				for _, word5 := range okwords {
-					if !addable(word5, wordlist) {
+					if !addable(word5, wordlist[len(wordlist)-1], addedLetters) {
 						continue
 					}
+					addedLetters = addLetters(addedLetters, word5.Letters)
 					wordlist = append(wordlist, word5)
 					var combination []string
 					for _, word := range wordlist {
 						combination = append(combination, word.Word)
 					}
 					foundcombinations = append(foundcombinations, combination)
+					for letter, _ := range word5.Letters {
+						addedLetters[letter] = false
+					}
 					wordlist = wordlist[:len(wordlist)-1]
+				}
+				for letter, _ := range word4.Letters {
+					addedLetters[letter] = false
 				}
 				wordlist = wordlist[:len(wordlist)-1]
 			}
+			for letter, _ := range word3.Letters {
+				addedLetters[letter] = false
+			}
 			wordlist = wordlist[:len(wordlist)-1]
+		}
+		for letter, _ := range word2.Letters {
+			addedLetters[letter] = false
 		}
 		wordlist = wordlist[:len(wordlist)-1]
 	}
 	return foundcombinations
 }
 
-func addable(word Word, words []Word) bool {
+func addable(word Word, prevword Word, l map[rune]bool) bool {
 	wordBytes := []byte(word.Word)
-	previusWord := []byte(words[len(words)-1].Word)
+	previusWord := []byte(prevword.Word)
 	if wordBytes[0] <= previusWord[0] {
 		return false
 	}
 
-	for _, word2 := range words {
-		for letter, _ := range word2.Letters {
-			if _, ok := word.Letters[letter]; ok {
-				return false
-			}
+	for letter, _ := range word.Letters {
+		if word.Letters[letter] == l[letter] {
+			return false
 		}
 	}
 
@@ -261,6 +277,22 @@ func hasanagram(index int, words []Word) bool {
 		}
 	}
 	return false
+}
+
+func addLetters(letters, word map[rune]bool) map[rune]bool {
+	newLetters := copyLetters(letters)
+	for letter, _ := range word {
+		newLetters[letter] = true
+	}
+	return newLetters
+}
+
+func copyLetters(src map[rune]bool) map[rune]bool {
+	dst := make(map[rune]bool, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
 }
 
 func timeRemaining(tasksTotal, tasksCompleted, threads int, timePassed time.Duration) time.Duration {
