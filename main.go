@@ -224,20 +224,18 @@ func finishwordlist(index int, okwords []Word) [][]string {
 }
 
 func addable(word Word, words []Word) bool {
-	if strings.Compare(words[len(words)-1].Word, word.Word) > 0 {
+	wordBytes := []byte(word.Word)
+	previusWord := []byte(words[len(words)-1].Word)
+	if wordBytes[0] <= previusWord[0] {
 		return false
 	}
 
 	for _, word2 := range words {
-		if word2.Word == word.Word {
-			return false
-		}
 		for letter, _ := range word2.Letters {
 			if _, ok := word.Letters[letter]; ok {
 				return false
 			}
 		}
-
 	}
 
 	return true
