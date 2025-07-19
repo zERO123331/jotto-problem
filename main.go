@@ -14,8 +14,14 @@ const threads = 20
 const expected = 538
 
 type Word struct {
-	Word    string
-	Letters map[rune]bool
+	Word     string
+	Anagrams []string
+	Letters  map[rune]bool
+}
+
+type Anagram struct {
+	Word        string
+	SortLetters string
 }
 
 func main() {
@@ -58,35 +64,44 @@ func main() {
 			Letters: foundletters,
 		})
 	}
-
-	slices.SortFunc(okwords, func(a, b Word) int {
-		return strings.Compare(a.Word, b.Word)
-	})
-
 	wordschannel := make(chan []Word, 100)
 	finishedchannel := make(chan bool, threads)
+	anagramChannel := make(chan []Anagram, 100)
 	for i := 0; i < threads; i++ {
-		go func(wordschannel chan<- []Word, finishedchannel chan<- bool, i int, okwords []Word) {
+		go func(wordschannel chan<- []Word, finishedchannel chan<- bool, anagramChannel chan<- []Anagram, i int, okwords []Word) {
 			j := i
 			var newokwords []Word
+			var anagrams []Anagram
 			for j < len(okwords) {
-				if !hasanagram(j, okwords) {
-					newokwords = append(newokwords, okwords[j])
+				anagram := Anagram{
+					Word:        okwords[j].Word,
+					SortLetters: sortLetters(okwords[j].Word),
 				}
+				if !hasanagram(j, okwords) {
+					word := okwords[j]
+					word.Word = anagram.SortLetters
+					newokwords = append(newokwords, word)
+				}
+				anagrams = append(anagrams, anagram)
 				j += threads
 			}
 			wordschannel <- newokwords
+			anagramChannel <- anagrams
 			finishedchannel <- true
-		}(wordschannel, finishedchannel, i, okwords)
+		}(wordschannel, finishedchannel, anagramChannel, i, okwords)
 	}
 
-	newokwords := []Word{}
+	var newOkWords []Word
+	var anagrams []Anagram
 	i := 0
 	for i < threads {
 		data := <-wordschannel
 		if len(data) != 0 {
-			newokwords = append(newokwords, data...)
+			newOkWords = append(newOkWords, data...)
 		}
+
+		recievedAnagrams := <-anagramChannel
+		anagrams = append(anagrams, recievedAnagrams...)
 
 		hasfinished := <-finishedchannel
 		if hasfinished {
@@ -94,52 +109,76 @@ func main() {
 		}
 	}
 
-	okwords = newokwords
+	close(finishedchannel)
+	close(wordschannel)
 
-	logger.Info("Testing with", "Words", len(okwords))
-	logger.Info("Finished Checking", "Duration", time.Since(starttime).String())
+	okwords = newOkWords
+	for _, anagram := range anagrams {
+		anagram.SortLetters = sortLetters(anagram.Word)
+		for i, word := range okwords {
+			if word.Word == anagram.SortLetters {
+				word.Anagrams = append(word.Anagrams, anagram.Word)
+				newOkWords[i] = word
+				break
+			}
+		}
+	}
+	seenAnagrams := make(map[string]bool)
+	for _, word := range okwords {
+		for _, anagram := range word.Anagrams {
+			if seenAnagrams[anagram] {
+				panic("Anagram already seen")
+			}
+			seenAnagrams[anagram] = true
+		}
+	}
+
+	slices.SortFunc(okwords, func(a, b Word) int {
+		return strings.Compare(a.Word, b.Word)
+	})
+
+	logger.Info("Finished setting up Words and Anagrams", "Duration", time.Since(starttime).String())
+	logger.Info("Starting Pair search with parameters:", "Word count", len(okwords), "Threads", threads, `Expected Pairs`, expected)
 	searchStartTime := time.Now()
-	ch := make(chan [][]string, 100)
-	finished := make(chan bool, threads)
+	ch := make(chan [][]Word, threads)
 	for i := 0; i < threads; i++ {
-		go func(ch chan<- [][]string, finished chan<- bool, i int, okwords []Word) {
+		go func(ch chan<- [][]Word, i int, okwords []Word) {
 			j := i
+			var data [][]Word
 			for j < len(okwords) {
-				data := finishWordList(j, okwords)
-				ch <- data
-				finished <- false
+				data = append(data, finishWordList(j, okwords)...)
 				j += threads
 			}
-			finished <- true
-			ch <- [][]string{}
-		}(ch, finished, i, okwords)
+			ch <- data
+		}(ch, i, okwords)
 	}
-	var wordpairs [][]string
+	var wordpairs [][]Word
 	i = 0
 	pairsReceived := 0
-	totalTasks := len(okwords)
-	tasksCompleted := 0
 	for i < threads {
 		data := <-ch
-		tasksCompleted++
 		if len(data) != 0 {
 			pairsReceived += len(data)
 			averageTime := time.Since(searchStartTime).Seconds() / float64(pairsReceived)
 			wordpairs = append(wordpairs, data...)
-			estimatedTime := timeRemaining(totalTasks, tasksCompleted, threads, time.Since(searchStartTime))
-			logger.Info("Pair(s) received", "Amount Received", len(data), "Total Pairs", len(wordpairs), "Expected", expected, "Average Time", fmt.Sprintf("%f Seconds/Pair", averageTime), "Estimated Time Remaining", estimatedTime.String(), "Estimated Total Time", (estimatedTime + time.Since(searchStartTime)).String(), "Workers working", fmt.Sprintf("%d/%d", threads-i, threads), "Tasks Completed", tasksCompleted)
+			estimatedTime := timeRemaining(expected, len(wordpairs), threads, time.Since(searchStartTime))
+			logger.Info("Pair(s) received", "Amount Received", len(data), "Total Pairs", len(wordpairs), "Expected", expected, "Average Time", fmt.Sprintf("%f Seconds/Pair", averageTime), "Estimated Time Remaining", estimatedTime.String(), "Estimated Total Time", (estimatedTime + time.Since(searchStartTime)).String(), "Workers working", fmt.Sprintf("%d/%d", threads-i, threads))
+		} else {
+			logger.Error("A worker has finished but no data was received")
 		}
-		hasfinished := <-finished
-		if hasfinished {
-			i++
-			tasksCompleted--
-			logger.Info("A worker has finished", "Workers done", i)
-		}
+		i++
 	}
 	logger.Info("Finished making Pairs", "Duration", time.Since(starttime).String())
 	logger.Info("Pairs", "Received/Expected", fmt.Sprintf("%d/%d", len(wordpairs), expected))
+	close(ch)
 
-	slices.SortFunc(wordpairs, func(a, b []string) int {
+	logger.Info("Starting Anagram search")
+
+	solutions := assembleSolutions(wordpairs)
+
+	logger.Info("Solutions with anagrams", "Solutions", len(solutions))
+
+	slices.SortFunc(solutions, func(a, b []string) int {
 		if i := strings.Compare(a[0], b[0]); i != 0 {
 			return i
 		}
@@ -163,11 +202,16 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	err = outputfile.Truncate(0)
+	if err != nil {
+		logger.Error("Error truncating file", "Error", err)
+		panic(err)
+	}
 
 	defer outputfile.Close()
 
 	writeErrors := 0
-	for _, pair := range wordpairs {
+	for _, pair := range solutions {
 		_, err = outputfile.WriteString(strings.Join(pair, " ") + "\n")
 		if err != nil {
 			writeErrors++
@@ -182,13 +226,13 @@ func main() {
 	}
 }
 
-func finishWordList(index int, okwords []Word) [][]string {
+func finishWordList(index int, okwords []Word) [][]Word {
 	wordlist := []Word{
 		okwords[index],
 	}
 	var addedLetters map[rune]bool
 	addedLetters = addLetters(addedLetters, wordlist[0].Letters)
-	var foundcombinations [][]string
+	var foundcombinations [][]Word
 	for _, word2 := range okwords {
 		if !addable(word2, wordlist[len(wordlist)-1], addedLetters) {
 			continue
@@ -213,11 +257,9 @@ func finishWordList(index int, okwords []Word) [][]string {
 					}
 					addedLetters = addLetters(addedLetters, word5.Letters)
 					wordlist = append(wordlist, word5)
-					var combination []string
-					for _, word := range wordlist {
-						combination = append(combination, word.Word)
-					}
-					foundcombinations = append(foundcombinations, combination)
+					foundcombinations = append(foundcombinations, []Word{
+						wordlist[0], word2, word3, word4, word5,
+					})
 					for letter, _ := range word5.Letters {
 						addedLetters[letter] = false
 					}
@@ -243,8 +285,8 @@ func finishWordList(index int, okwords []Word) [][]string {
 
 func addable(word Word, prevword Word, l map[rune]bool) bool {
 	wordBytes := []byte(word.Word)
-	previusWord := []byte(prevword.Word)
-	if wordBytes[0] <= previusWord[0] {
+	previousWord := []byte(prevword.Word)
+	if wordBytes[0] <= previousWord[0] {
 		return false
 	}
 
@@ -255,6 +297,22 @@ func addable(word Word, prevword Word, l map[rune]bool) bool {
 	}
 
 	return true
+}
+
+func sortLetters(word string) string {
+	letterOrder := []rune{
+		'e', 's', 'i', 'a', 'r', 'n', 't', 'o', 'l', 'c', 'd', 'u', 'g', 'p', 'm', 'h', 'b', 'y', 'f', 'v', 'k', 'w', 'z', 'x', 'j', 'q',
+	}
+	var sortedLetters []rune
+	for _, sortedLetter := range letterOrder {
+		for _, letter := range word {
+			if letter == sortedLetter {
+				sortedLetters = append(sortedLetters, letter)
+			}
+		}
+	}
+	return string(sortedLetters)
+
 }
 
 func hasanagram(index int, words []Word) bool {
@@ -299,4 +357,39 @@ func timeRemaining(tasksTotal, tasksCompleted, threads int, timePassed time.Dura
 	tasksRemaining := tasksTotal - tasksCompleted
 	timeRemaining := timePassed * time.Duration(tasksRemaining) / time.Duration(tasksCompleted)
 	return timeRemaining
+}
+
+func assembleSolutions(wordPairs [][]Word) [][]string {
+	solutions := [][]string{}
+	for _, pair := range wordPairs {
+		words := make([][]string, len(pair))
+		for i, word := range pair {
+			var anagrams []string
+			if word.Anagrams == nil {
+				panic("Anagrams is nil")
+			}
+			for _, anagram := range word.Anagrams {
+				anagrams = append(anagrams, anagram)
+			}
+			words[i] = anagrams
+		}
+		for _, word1 := range words[0] {
+			for _, word2 := range words[1] {
+				for _, word3 := range words[2] {
+					for _, word4 := range words[3] {
+						for _, word5 := range words[4] {
+							solutions = append(solutions, []string{word1, word2, word3, word4, word5})
+						}
+					}
+				}
+			}
+		}
+	}
+	for i, solution := range solutions {
+		slices.SortFunc(solution, func(a, b string) int {
+			return strings.Compare(a, b)
+		})
+		solutions[i] = solution
+	}
+	return solutions
 }
