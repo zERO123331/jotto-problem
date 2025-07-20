@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const threads = 20
+const workers = 20
 const expected = 538
 
 type Word struct {
@@ -27,7 +27,7 @@ type Anagram struct {
 func main() {
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	logger.Info("Starting", "Threads", threads, "Expected Pairs", expected)
+	logger.Info("Starting", "Workers", workers, "Expected Pairs", expected)
 	starttime := time.Now()
 	file, err := os.Open("words_alpha.txt")
 	if err != nil {
@@ -65,36 +65,22 @@ func main() {
 		})
 	}
 	wordschannel := make(chan []Word, 100)
-	finishedchannel := make(chan bool, threads)
 	anagramChannel := make(chan []Anagram, 100)
-	for i := 0; i < threads; i++ {
-		go func(wordschannel chan<- []Word, finishedchannel chan<- bool, anagramChannel chan<- []Anagram, i int, okwords []Word) {
-			j := i
-			var newokwords []Word
-			var anagrams []Anagram
-			for j < len(okwords) {
-				anagram := Anagram{
-					Word:        okwords[j].Word,
-					SortLetters: sortLetters(okwords[j].Word),
-				}
-				if !hasanagram(j, okwords) {
-					word := okwords[j]
-					word.Word = anagram.SortLetters
-					newokwords = append(newokwords, word)
-				}
-				anagrams = append(anagrams, anagram)
-				j += threads
-			}
-			wordschannel <- newokwords
-			anagramChannel <- anagrams
-			finishedchannel <- true
-		}(wordschannel, finishedchannel, anagramChannel, i, okwords)
+	jobChannel := make(chan int, len(okwords))
+	for i := 0; i < workers; i++ {
+		go filterWords(wordschannel, anagramChannel, jobChannel, okwords)
 	}
+
+	for i := 0; i < len(okwords); i++ {
+		jobChannel <- i
+	}
+
+	close(jobChannel)
 
 	var newOkWords []Word
 	var anagrams []Anagram
 	i := 0
-	for i < threads {
+	for i < workers {
 		data := <-wordschannel
 		if len(data) != 0 {
 			newOkWords = append(newOkWords, data...)
@@ -102,15 +88,11 @@ func main() {
 
 		recievedAnagrams := <-anagramChannel
 		anagrams = append(anagrams, recievedAnagrams...)
-
-		hasfinished := <-finishedchannel
-		if hasfinished {
-			i += 1
-		}
+		i++
 	}
 
-	close(finishedchannel)
 	close(wordschannel)
+	close(anagramChannel)
 
 	okwords = newOkWords
 	for _, anagram := range anagrams {
@@ -138,35 +120,30 @@ func main() {
 	})
 
 	logger.Info("Finished setting up Words and Anagrams", "Duration", time.Since(starttime).String())
-	logger.Info("Starting Pair search with parameters:", "Word count", len(okwords), "Threads", threads, `Expected Pairs`, expected)
+	logger.Info("Starting Pair search with parameters:", "Word count", len(okwords), "Threads", workers, `Expected Pairs`, expected)
 	searchStartTime := time.Now()
-	ch := make(chan [][]Word, threads)
-	for i := 0; i < threads; i++ {
-		go func(ch chan<- [][]Word, i int, okwords []Word) {
-			j := i
-			var data [][]Word
-			for j < len(okwords) {
-				data = append(data, finishWordList(j, okwords)...)
-				j += threads
-			}
-			ch <- data
-		}(ch, i, okwords)
+	ch := make(chan [][]Word, workers)
+	jobChannel = make(chan int, len(okwords))
+	for i := 0; i < workers; i++ {
+		go finishWordlistWorker(ch, jobChannel, okwords)
 	}
+	for i := 0; i < len(okwords); i++ {
+		jobChannel <- i
+	}
+	close(jobChannel)
 	var wordpairs [][]Word
-	i = 0
 	pairsReceived := 0
-	for i < threads {
+	for i := 0; i < workers; i++ {
 		data := <-ch
 		if len(data) != 0 {
 			pairsReceived += len(data)
 			averageTime := time.Since(searchStartTime).Seconds() / float64(pairsReceived)
 			wordpairs = append(wordpairs, data...)
-			estimatedTime := timeRemaining(expected, len(wordpairs), threads, time.Since(searchStartTime))
-			logger.Info("Pair(s) received", "Amount Received", len(data), "Total Pairs", len(wordpairs), "Expected", expected, "Average Time", fmt.Sprintf("%f Seconds/Pair", averageTime), "Estimated Time Remaining", estimatedTime.String(), "Estimated Total Time", (estimatedTime + time.Since(searchStartTime)).String(), "Workers working", fmt.Sprintf("%d/%d", threads-i, threads))
+			estimatedTime := timeRemaining(expected, len(wordpairs), workers, time.Since(searchStartTime))
+			logger.Info("Pair(s) received", "Amount Received", len(data), "Total Pairs", len(wordpairs), "Expected", expected, "Average Time", fmt.Sprintf("%f Seconds/Pair", averageTime), "Estimated Time Remaining", estimatedTime.String(), "Estimated Total Time", (estimatedTime + time.Since(searchStartTime)).String(), "Workers working", fmt.Sprintf("%d/%d", workers-i, workers))
 		} else {
 			logger.Error("A worker has finished but no data was received")
 		}
-		i++
 	}
 	logger.Info("Finished making Pairs", "Duration", time.Since(starttime).String())
 	logger.Info("Pairs", "Received/Expected", fmt.Sprintf("%d/%d", len(wordpairs), expected))
@@ -224,6 +201,33 @@ func main() {
 	if len(wordpairs) != expected {
 		logger.Error("Wrong number of pairs", "Expected", expected, "Received", len(wordpairs))
 	}
+}
+
+func filterWords(resultChannel chan<- []Word, anagramChannel chan<- []Anagram, jobChannel <-chan int, okwords []Word) {
+	var newokwords []Word
+	var anagrams []Anagram
+	for j := range jobChannel {
+		anagram := Anagram{
+			Word:        okwords[j].Word,
+			SortLetters: sortLetters(okwords[j].Word),
+		}
+		if !hasanagram(j, okwords) {
+			word := okwords[j]
+			word.Word = anagram.SortLetters
+			newokwords = append(newokwords, word)
+		}
+		anagrams = append(anagrams, anagram)
+	}
+	resultChannel <- newokwords
+	anagramChannel <- anagrams
+}
+
+func finishWordlistWorker(resultChannel chan<- [][]Word, jobChannel <-chan int, okwords []Word) {
+	var newokwords [][]Word
+	for j := range jobChannel {
+		newokwords = append(newokwords, finishWordList(j, okwords)...)
+	}
+	resultChannel <- newokwords
 }
 
 func finishWordList(index int, okwords []Word) [][]Word {
