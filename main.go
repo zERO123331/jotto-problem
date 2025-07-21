@@ -15,8 +15,8 @@ const expected = 538
 
 type Word struct {
 	Word     string
+	Bytes    []byte
 	Anagrams []string
-	Letters  map[rune]bool
 }
 
 type Anagram struct {
@@ -60,8 +60,7 @@ func main() {
 		}
 		wordletterlist = append(wordletterlist, foundletters)
 		okwords = append(okwords, Word{
-			Word:    word,
-			Letters: foundletters,
+			Word: word,
 		})
 	}
 	wordschannel := make(chan []Word, 100)
@@ -114,13 +113,15 @@ func main() {
 			seenAnagrams[anagram] = true
 		}
 	}
+	anagrams = nil
+	seenAnagrams = nil
 
 	slices.SortFunc(okwords, func(a, b Word) int {
 		return strings.Compare(a.Word, b.Word)
 	})
 
 	logger.Info("Finished setting up Words and Anagrams", "Duration", time.Since(starttime).String())
-	logger.Info("Starting Pair search with parameters:", "Word count", len(okwords), "Threads", workers, `Expected Pairs`, expected)
+	logger.Info("Starting Pair search with parameter", "Words", len(okwords))
 	searchStartTime := time.Now()
 	ch := make(chan [][]Word, workers)
 	jobChannel = make(chan int, len(okwords))
@@ -131,21 +132,18 @@ func main() {
 		jobChannel <- i
 	}
 	close(jobChannel)
+	/*for len(jobChannel) > 100 {
+		logger.Info("Searching Progress", "Progess", fmt.Sprintf("%f%%", 100-float64(len(jobChannel))/float64(len(okwords))*100))
+		time.Sleep(5 * time.Second)
+	}
+	logger.Info("Awaiting Worker results")*/
 	var wordpairs [][]Word
-	pairsReceived := 0
 	for i := 0; i < workers; i++ {
 		data := <-ch
-		if len(data) != 0 {
-			pairsReceived += len(data)
-			averageTime := time.Since(searchStartTime).Seconds() / float64(pairsReceived)
-			wordpairs = append(wordpairs, data...)
-			estimatedTime := timeRemaining(expected, len(wordpairs), workers, time.Since(searchStartTime))
-			logger.Info("Pair(s) received", "Amount Received", len(data), "Total Pairs", len(wordpairs), "Expected", expected, "Average Time", fmt.Sprintf("%f Seconds/Pair", averageTime), "Estimated Time Remaining", estimatedTime.String(), "Estimated Total Time", (estimatedTime + time.Since(searchStartTime)).String(), "Workers working", fmt.Sprintf("%d/%d", workers-i, workers))
-		} else {
-			logger.Error("A worker has finished but no data was received")
-		}
+		wordpairs = append(wordpairs, data...)
 	}
-	logger.Info("Finished making Pairs", "Duration", time.Since(starttime).String())
+
+	logger.Info("Finished making Pairs", "Duration", time.Since(searchStartTime).String(), "Total Duration", time.Since(starttime).String())
 	logger.Info("Pairs", "Received/Expected", fmt.Sprintf("%d/%d", len(wordpairs), expected))
 	close(ch)
 
@@ -214,6 +212,13 @@ func filterWords(resultChannel chan<- []Word, anagramChannel chan<- []Anagram, j
 		if !hasanagram(j, okwords) {
 			word := okwords[j]
 			word.Word = anagram.SortLetters
+			word.Bytes = []byte{
+				anagram.SortLetters[0],
+				anagram.SortLetters[1],
+				anagram.SortLetters[2],
+				anagram.SortLetters[3],
+				anagram.SortLetters[4],
+			}
 			newokwords = append(newokwords, word)
 		}
 		anagrams = append(anagrams, anagram)
@@ -225,82 +230,69 @@ func filterWords(resultChannel chan<- []Word, anagramChannel chan<- []Anagram, j
 func finishWordlistWorker(resultChannel chan<- [][]Word, jobChannel <-chan int, okwords []Word) {
 	var newokwords [][]Word
 	for j := range jobChannel {
-		newokwords = append(newokwords, finishWordList(j, okwords)...)
+		newokwords = append(newokwords, finishWordList(okwords[j:])...)
 	}
 	resultChannel <- newokwords
 }
 
-func finishWordList(index int, okwords []Word) [][]Word {
-	wordlist := []Word{
-		okwords[index],
-	}
-	var addedLetters map[rune]bool
-	addedLetters = addLetters(addedLetters, wordlist[0].Letters)
+func finishWordList(okwords []Word) [][]Word {
+	word := okwords[0]
+	addedLetters := make(map[byte]bool)
+	addedLetters = addLetters(addedLetters, word.Bytes)
 	var foundcombinations [][]Word
-	for _, word2 := range okwords {
-		if !addable(word2, wordlist[len(wordlist)-1], addedLetters) {
+	index1 := 1
+	for i, word2 := range okwords[index1:] {
+		if !addableFunc(word2, word.Bytes[0], addedLetters) {
 			continue
 		}
-		addedLetters = addLetters(addedLetters, word2.Letters)
-		wordlist = append(wordlist, word2)
-		for _, word3 := range okwords {
-			if !addable(word3, wordlist[len(wordlist)-1], addedLetters) {
+		addedLetters = addLetters(addedLetters, word2.Bytes)
+		index2 := i + index1
+		for j, word3 := range okwords[index2:] {
+			if !addableFunc(word3, word2.Bytes[0], addedLetters) {
 				continue
 			}
-			addedLetters = addLetters(addedLetters, word3.Letters)
-			wordlist = append(wordlist, word3)
-			for _, word4 := range okwords {
-				if !addable(word4, wordlist[len(wordlist)-1], addedLetters) {
+			addedLetters = addLetters(addedLetters, word3.Bytes)
+			index3 := j + index2
+			for k, word4 := range okwords[index3:] {
+				if !addableFunc(word4, word3.Bytes[0], addedLetters) {
 					continue
 				}
-				addedLetters = addLetters(addedLetters, word4.Letters)
-				wordlist = append(wordlist, word4)
-				for _, word5 := range okwords {
-					if !addable(word5, wordlist[len(wordlist)-1], addedLetters) {
-						continue
+				addedLetters = addLetters(addedLetters, word4.Bytes)
+				index4 := k + index3
+				for _, word5 := range okwords[index4:] {
+					if addableFunc(word5, word4.Bytes[0], addedLetters) {
+						foundcombinations = append(foundcombinations, []Word{
+							word, word2, word3, word4, word5,
+						})
 					}
-					addedLetters = addLetters(addedLetters, word5.Letters)
-					wordlist = append(wordlist, word5)
-					foundcombinations = append(foundcombinations, []Word{
-						wordlist[0], word2, word3, word4, word5,
-					})
-					for letter, _ := range word5.Letters {
-						addedLetters[letter] = false
-					}
-					wordlist = wordlist[:len(wordlist)-1]
 				}
-				for letter, _ := range word4.Letters {
-					addedLetters[letter] = false
-				}
-				wordlist = wordlist[:len(wordlist)-1]
+				addedLetters = removeLetters(addedLetters, word4.Bytes)
 			}
-			for letter, _ := range word3.Letters {
-				addedLetters[letter] = false
-			}
-			wordlist = wordlist[:len(wordlist)-1]
+			addedLetters = removeLetters(addedLetters, word3.Bytes)
 		}
-		for letter, _ := range word2.Letters {
-			addedLetters[letter] = false
-		}
-		wordlist = wordlist[:len(wordlist)-1]
+		addedLetters = removeLetters(addedLetters, word2.Bytes)
 	}
 	return foundcombinations
 }
 
-func addable(word Word, prevword Word, l map[rune]bool) bool {
-	wordBytes := []byte(word.Word)
-	previousWord := []byte(prevword.Word)
-	if wordBytes[0] <= previousWord[0] {
+func addableFunc(word Word, prevword byte, addedLetters map[byte]bool) bool {
+	if word.Bytes[0] <= prevword {
 		return false
 	}
-
-	for letter, _ := range word.Letters {
-		if word.Letters[letter] == l[letter] {
-			return false
-		}
+	switch {
+	case addedLetters[word.Bytes[0]]:
+		return false
+	case addedLetters[word.Bytes[1]]:
+		return false
+	case addedLetters[word.Bytes[2]]:
+		return false
+	case addedLetters[word.Bytes[3]]:
+		return false
+	case addedLetters[word.Bytes[4]]:
+		return false
+	default:
+		return true
 	}
-
-	return true
 }
 
 func sortLetters(word string) string {
@@ -321,46 +313,50 @@ func sortLetters(word string) string {
 
 func hasanagram(index int, words []Word) bool {
 	word := words[index]
-	i := 0
 	for _, testWord := range words {
 		if word.Word == testWord.Word {
 			return false
 		}
-		i = 0
-		for letter, _ := range word.Letters {
-			if _, ok := testWord.Letters[letter]; ok {
+		i := 0
+		for _, letter := range word.Word {
+			if slices.Contains([]rune(testWord.Word), letter) {
 				i++
 				continue
 			}
 			break
 		}
-		if i == 5 {
-			return true
+		if i != 5 {
+			continue
 		}
+		return true
 	}
 	return false
 }
 
-func addLetters(letters, word map[rune]bool) map[rune]bool {
-	newLetters := copyLetters(letters)
-	for letter, _ := range word {
-		newLetters[letter] = true
-	}
-	return newLetters
+func addLetters(letters map[byte]bool, word []byte) map[byte]bool {
+	letters[word[0]] = true
+	letters[word[1]] = true
+	letters[word[2]] = true
+	letters[word[3]] = true
+	letters[word[4]] = true
+	return letters
 }
 
-func copyLetters(src map[rune]bool) map[rune]bool {
-	dst := make(map[rune]bool, len(src))
+func removeLetters(letters map[byte]bool, word []byte) map[byte]bool {
+	letters[word[0]] = false
+	letters[word[1]] = false
+	letters[word[2]] = false
+	letters[word[3]] = false
+	letters[word[4]] = false
+	return letters
+}
+
+func copyLetters(src map[byte]bool) map[byte]bool {
+	dst := make(map[byte]bool, len(src))
 	for k, v := range src {
 		dst[k] = v
 	}
 	return dst
-}
-
-func timeRemaining(tasksTotal, tasksCompleted, threads int, timePassed time.Duration) time.Duration {
-	tasksRemaining := tasksTotal - tasksCompleted
-	timeRemaining := timePassed * time.Duration(tasksRemaining) / time.Duration(tasksCompleted)
-	return timeRemaining
 }
 
 func assembleSolutions(wordPairs [][]Word) [][]string {
