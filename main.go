@@ -14,10 +14,11 @@ const workers = 20
 const expected = 538
 
 type Node struct {
-	Word     string
-	Bytes    []byte
-	Leafs    []*Node
-	Anagrams []string
+	Word             string
+	Bytes            []byte
+	Leafs            []*Node
+	AllowedLeafLeafs map[*Node][]*Node
+	Anagrams         []string
 }
 
 type Anagram struct {
@@ -146,6 +147,31 @@ func main() {
 		return strings.Compare(a.Word, b.Word)
 	})
 
+	logger.Info("Assembling Leaf Leafs")
+
+	wordsChannel = make(chan []*Node, workers)
+	leafLeafJobChannel := make(chan int, len(okWords))
+
+	for i := 0; i < workers; i++ {
+		go assembleLeafLeafWorker(wordsChannel, leafLeafJobChannel, okWords)
+	}
+
+	for i := 0; i < len(okWords); i++ {
+		leafLeafJobChannel <- i
+	}
+	close(leafLeafJobChannel)
+	var receivedElements2 []*Node
+	for i := 0; i < workers; i++ {
+		data := <-wordsChannel
+		receivedElements2 = append(receivedElements2, data...)
+	}
+	okWords = receivedElements2
+	close(wordsChannel)
+	slices.SortFunc(okWords, func(a, b *Node) int {
+		return strings.Compare(a.Word, b.Word)
+	})
+	logger.Info("Finished assembling Leaf Leafs")
+
 	logger.Info("Finished setting up Words and Anagrams", "Duration", time.Since(startTime).String())
 	logger.Info("Starting Pair search with parameter", "Words", len(okWords))
 	searchStartTime := time.Now()
@@ -158,11 +184,11 @@ func main() {
 		jobChannel <- i
 	}
 	close(jobChannel)
-	/*for len(jobChannel) > 100 {
+	/*for i := 0; i < 23; i++ {
 		logger.Info("Searching Progress", "Progress", fmt.Sprintf("%f%%", 100-float64(len(jobChannel))/float64(len(okWords))*100))
-		time.Sleep(5 * time.Second)
+		time.Sleep(1 * time.Second)
 	}
-	logger.Info("Awaiting Worker results")*/
+	/*logger.Info("Awaiting Worker results")*/
 	var wordPairs [][]*Node
 	for i := 0; i < workers; i++ {
 		data := <-ch
@@ -259,6 +285,16 @@ func assembleLeafWorker(resultChannel chan<- []*Node, jobChannel <-chan int, okW
 	resultChannel <- checkedParentLeafCombo
 }
 
+func assembleLeafLeafWorker(resultChannel chan<- []*Node, jobChannel <-chan int, okWords []*Node) {
+	var checkedParentLeafLeafCombo []*Node
+	for j := range jobChannel {
+		node := okWords[j]
+		node.CheckAllowedLeafLeafs()
+		checkedParentLeafLeafCombo = append(checkedParentLeafLeafCombo, node)
+	}
+	resultChannel <- checkedParentLeafLeafCombo
+}
+
 func finishWordlistWorker(resultChannel chan<- [][]*Node, jobChannel <-chan int, okWords []*Node) {
 	var newOkWords [][]*Node
 	for j := range jobChannel {
@@ -277,17 +313,17 @@ func finishWordList(okWords []*Node) [][]*Node {
 			continue
 		}
 		addedLetters = addLetters(addedLetters, word2.Bytes)
-		for _, word3 := range word2.Leafs {
+		for _, word3 := range word.AllowedLeafLeafs[word2] {
 			if !addableFunc(word3, addedLetters) {
 				continue
 			}
 			addedLetters = addLetters(addedLetters, word3.Bytes)
-			for _, word4 := range word3.Leafs {
+			for _, word4 := range word2.AllowedLeafLeafs[word3] {
 				if !addableFunc(word4, addedLetters) {
 					continue
 				}
 				addedLetters = addLetters(addedLetters, word4.Bytes)
-				for _, word5 := range word4.Leafs {
+				for _, word5 := range word3.AllowedLeafLeafs[word4] {
 					if addableFunc(word5, addedLetters) {
 						foundCombinations = append(foundCombinations, []*Node{
 							word, word2, word3, word4, word5,
@@ -426,4 +462,16 @@ func (n *Node) isLeafOk(node *Node) bool {
 		}
 	}
 	return true
+}
+
+func (n *Node) CheckAllowedLeafLeafs() {
+	n.AllowedLeafLeafs = make(map[*Node][]*Node)
+	for _, leaf := range n.Leafs {
+		for _, leafLeaf := range leaf.Leafs {
+			if !n.isLeafOk(leafLeaf) {
+				continue
+			}
+			n.AllowedLeafLeafs[leaf] = append(n.AllowedLeafLeafs[leaf], leafLeaf)
+		}
+	}
 }
