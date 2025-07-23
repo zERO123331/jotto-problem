@@ -305,55 +305,24 @@ func finishWordlistWorker(resultChannel chan<- [][]*Node, jobChannel <-chan int,
 
 func finishWordList(okWords []*Node) [][]*Node {
 	word := okWords[0]
-	addedLetters := make(map[byte]bool)
-	addedLetters = addLetters(addedLetters, word.Bytes)
 	var foundCombinations [][]*Node
 	for _, word2 := range word.Leafs {
-		if !addableFunc(word2, addedLetters) {
-			continue
-		}
-		addedLetters = addLetters(addedLetters, word2.Bytes)
 		for _, word3 := range word.AllowedLeafLeafs[word2] {
-			if !addableFunc(word3, addedLetters) {
-				continue
-			}
-			addedLetters = addLetters(addedLetters, word3.Bytes)
 			for _, word4 := range word2.AllowedLeafLeafs[word3] {
-				if !addableFunc(word4, addedLetters) {
+				if !word.isLeafOk(word4) {
 					continue
 				}
-				addedLetters = addLetters(addedLetters, word4.Bytes)
 				for _, word5 := range word3.AllowedLeafLeafs[word4] {
-					if addableFunc(word5, addedLetters) {
+					if word2.isLeafOk(word5) && word.isLeafOk(word5) {
 						foundCombinations = append(foundCombinations, []*Node{
 							word, word2, word3, word4, word5,
 						})
 					}
 				}
-				addedLetters = removeLetters(addedLetters, word4.Bytes)
 			}
-			addedLetters = removeLetters(addedLetters, word3.Bytes)
 		}
-		addedLetters = removeLetters(addedLetters, word2.Bytes)
 	}
 	return foundCombinations
-}
-
-func addableFunc(word *Node, addedLetters map[byte]bool) bool {
-	switch {
-	case addedLetters[word.Bytes[0]]:
-		return false
-	case addedLetters[word.Bytes[1]]:
-		return false
-	case addedLetters[word.Bytes[2]]:
-		return false
-	case addedLetters[word.Bytes[3]]:
-		return false
-	case addedLetters[word.Bytes[4]]:
-		return false
-	default:
-		return true
-	}
 }
 
 func sortLetters(word string) string {
@@ -392,24 +361,6 @@ func hasAnagram(index int, words []*Node) bool {
 		return true
 	}
 	return false
-}
-
-func addLetters(letters map[byte]bool, word []byte) map[byte]bool {
-	letters[word[0]] = true
-	letters[word[1]] = true
-	letters[word[2]] = true
-	letters[word[3]] = true
-	letters[word[4]] = true
-	return letters
-}
-
-func removeLetters(letters map[byte]bool, word []byte) map[byte]bool {
-	letters[word[0]] = false
-	letters[word[1]] = false
-	letters[word[2]] = false
-	letters[word[3]] = false
-	letters[word[4]] = false
-	return letters
 }
 
 func assembleSolutions(wordPairs [][]*Node) [][]string {
@@ -456,12 +407,20 @@ func (n *Node) LeafAdder(nodes []*Node) {
 }
 
 func (n *Node) isLeafOk(node *Node) bool {
-	for _, letter := range node.Bytes {
-		if slices.Contains(n.Bytes, letter) {
-			return false
-		}
+	switch {
+	case slices.Contains(n.Bytes, node.Bytes[0]):
+		return false
+	case slices.Contains(n.Bytes, node.Bytes[1]):
+		return false
+	case slices.Contains(n.Bytes, node.Bytes[2]):
+		return false
+	case slices.Contains(n.Bytes, node.Bytes[3]):
+		return false
+	case slices.Contains(n.Bytes, node.Bytes[4]):
+		return false
+	default:
+		return true
 	}
-	return true
 }
 
 func (n *Node) CheckAllowedLeafLeafs() {
