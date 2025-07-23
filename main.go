@@ -13,9 +13,10 @@ import (
 const workers = 20
 const expected = 538
 
-type Word struct {
+type Node struct {
 	Word     string
 	Bytes    []byte
+	Leafs    []*Node
 	Anagrams []string
 }
 
@@ -28,7 +29,7 @@ func main() {
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	logger.Info("Starting", "Workers", workers, "Expected Pairs", expected)
-	starttime := time.Now()
+	startTime := time.Now()
 	file, err := os.Open("words_alpha.txt")
 	if err != nil {
 		panic(err)
@@ -43,60 +44,61 @@ func main() {
 			words = append(words, scanner.Text())
 		}
 	}
-	var wordletterlist []map[rune]bool
-	var okwords []Word
+
+	var wordLetterList []map[rune]bool
+	var okWords []*Node
 	for _, word := range words {
-		foundletters := make(map[rune]bool)
+		foundLetters := make(map[rune]bool)
 		invalid := false
 		for _, letter := range word {
-			if _, ok := foundletters[letter]; ok {
+			if _, ok := foundLetters[letter]; ok {
 				invalid = true
 				break
 			}
-			foundletters[letter] = true
+			foundLetters[letter] = true
 		}
 		if invalid {
 			continue
 		}
-		wordletterlist = append(wordletterlist, foundletters)
-		okwords = append(okwords, Word{
+		wordLetterList = append(wordLetterList, foundLetters)
+		okWords = append(okWords, &Node{
 			Word: word,
 		})
 	}
-	wordschannel := make(chan []Word, 100)
+	wordsChannel := make(chan []*Node, 100)
 	anagramChannel := make(chan []Anagram, 100)
-	jobChannel := make(chan int, len(okwords))
+	jobChannel := make(chan int, len(okWords))
 	for i := 0; i < workers; i++ {
-		go filterWords(wordschannel, anagramChannel, jobChannel, okwords)
+		go filterWords(wordsChannel, anagramChannel, jobChannel, okWords)
 	}
 
-	for i := 0; i < len(okwords); i++ {
+	for i := 0; i < len(okWords); i++ {
 		jobChannel <- i
 	}
 
 	close(jobChannel)
 
-	var newOkWords []Word
+	var newOkWords []*Node
 	var anagrams []Anagram
 	i := 0
 	for i < workers {
-		data := <-wordschannel
+		data := <-wordsChannel
 		if len(data) != 0 {
 			newOkWords = append(newOkWords, data...)
 		}
 
-		recievedAnagrams := <-anagramChannel
-		anagrams = append(anagrams, recievedAnagrams...)
+		receivedAnagrams := <-anagramChannel
+		anagrams = append(anagrams, receivedAnagrams...)
 		i++
 	}
 
-	close(wordschannel)
+	close(wordsChannel)
 	close(anagramChannel)
 
-	okwords = newOkWords
+	okWords = newOkWords
 	for _, anagram := range anagrams {
 		anagram.SortLetters = sortLetters(anagram.Word)
-		for i, word := range okwords {
+		for i, word := range okWords {
 			if word.Word == anagram.SortLetters {
 				word.Anagrams = append(word.Anagrams, anagram.Word)
 				newOkWords[i] = word
@@ -105,7 +107,7 @@ func main() {
 		}
 	}
 	seenAnagrams := make(map[string]bool)
-	for _, word := range okwords {
+	for _, word := range okWords {
 		for _, anagram := range word.Anagrams {
 			if seenAnagrams[anagram] {
 				panic("Anagram already seen")
@@ -115,41 +117,65 @@ func main() {
 	}
 	anagrams = nil
 	seenAnagrams = nil
-
-	slices.SortFunc(okwords, func(a, b Word) int {
+	slices.SortFunc(okWords, func(a, b *Node) int {
 		return strings.Compare(a.Word, b.Word)
 	})
 
-	logger.Info("Finished setting up Words and Anagrams", "Duration", time.Since(starttime).String())
-	logger.Info("Starting Pair search with parameter", "Words", len(okwords))
-	searchStartTime := time.Now()
-	ch := make(chan [][]Word, workers)
-	jobChannel = make(chan int, len(okwords))
+	logger.Info("Assembling Leafs")
+
+	leafJobChannel := make(chan int, len(okWords))
+	wordsChannel = make(chan []*Node, workers)
+
 	for i := 0; i < workers; i++ {
-		go finishWordlistWorker(ch, jobChannel, okwords)
+		go assembleLeafWorker(wordsChannel, leafJobChannel, okWords)
 	}
-	for i := 0; i < len(okwords); i++ {
+	for i := 0; i < len(okWords); i++ {
+		leafJobChannel <- i
+	}
+	close(leafJobChannel)
+	var receivedElements []*Node
+	for i := 0; i < workers; i++ {
+		data := <-wordsChannel
+		receivedElements = append(receivedElements, data...)
+	}
+	okWords = receivedElements
+	close(wordsChannel)
+	logger.Info("Finished assembling Leafs")
+
+	slices.SortFunc(okWords, func(a, b *Node) int {
+		return strings.Compare(a.Word, b.Word)
+	})
+
+	logger.Info("Finished setting up Words and Anagrams", "Duration", time.Since(startTime).String())
+	logger.Info("Starting Pair search with parameter", "Words", len(okWords))
+	searchStartTime := time.Now()
+	ch := make(chan [][]*Node, workers)
+	jobChannel = make(chan int, len(okWords))
+	for i := 0; i < workers; i++ {
+		go finishWordlistWorker(ch, jobChannel, okWords)
+	}
+	for i := 0; i < len(okWords); i++ {
 		jobChannel <- i
 	}
 	close(jobChannel)
 	/*for len(jobChannel) > 100 {
-		logger.Info("Searching Progress", "Progess", fmt.Sprintf("%f%%", 100-float64(len(jobChannel))/float64(len(okwords))*100))
+		logger.Info("Searching Progress", "Progress", fmt.Sprintf("%f%%", 100-float64(len(jobChannel))/float64(len(okWords))*100))
 		time.Sleep(5 * time.Second)
 	}
 	logger.Info("Awaiting Worker results")*/
-	var wordpairs [][]Word
+	var wordPairs [][]*Node
 	for i := 0; i < workers; i++ {
 		data := <-ch
-		wordpairs = append(wordpairs, data...)
+		wordPairs = append(wordPairs, data...)
 	}
 
-	logger.Info("Finished making Pairs", "Duration", time.Since(searchStartTime).String(), "Total Duration", time.Since(starttime).String())
-	logger.Info("Pairs", "Received/Expected", fmt.Sprintf("%d/%d", len(wordpairs), expected))
+	logger.Info("Finished making Pairs", "Duration", time.Since(searchStartTime).String(), "Total Duration", time.Since(startTime).String())
+	logger.Info("Pairs", "Received/Expected", fmt.Sprintf("%d/%d", len(wordPairs), expected))
 	close(ch)
 
 	logger.Info("Starting Anagram search")
 
-	solutions := assembleSolutions(wordpairs)
+	solutions := assembleSolutions(wordPairs)
 
 	logger.Info("Solutions with anagrams", "Solutions", len(solutions))
 
@@ -173,21 +199,21 @@ func main() {
 		return 0
 	})
 
-	outputfile, err := os.OpenFile("output.txt", os.O_CREATE|os.O_RDWR, 0644)
+	outputFile, err := os.OpenFile("output.txt", os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
 		panic(err)
 	}
-	err = outputfile.Truncate(0)
+	err = outputFile.Truncate(0)
 	if err != nil {
 		logger.Error("Error truncating file", "Error", err)
 		panic(err)
 	}
 
-	defer outputfile.Close()
+	defer outputFile.Close()
 
 	writeErrors := 0
 	for _, pair := range solutions {
-		_, err = outputfile.WriteString(strings.Join(pair, " ") + "\n")
+		_, err = outputFile.WriteString(strings.Join(pair, " ") + "\n")
 		if err != nil {
 			writeErrors++
 		}
@@ -195,73 +221,75 @@ func main() {
 			panic("Too many errors")
 		}
 	}
-	logger.Info("Finished", "Duration", time.Since(starttime).String())
-	if len(wordpairs) != expected {
-		logger.Error("Wrong number of pairs", "Expected", expected, "Received", len(wordpairs))
+	logger.Info("Finished", "Duration", time.Since(startTime).String())
+	if len(wordPairs) != expected {
+		logger.Error("Wrong number of pairs", "Expected", expected, "Received", len(wordPairs))
 	}
 }
 
-func filterWords(resultChannel chan<- []Word, anagramChannel chan<- []Anagram, jobChannel <-chan int, okwords []Word) {
-	var newokwords []Word
+func filterWords(resultChannel chan<- []*Node, anagramChannel chan<- []Anagram, jobChannel <-chan int, okWords []*Node) {
+	var newOkWords []*Node
 	var anagrams []Anagram
 	for j := range jobChannel {
-		anagram := Anagram{
-			Word:        okwords[j].Word,
-			SortLetters: sortLetters(okwords[j].Word),
-		}
-		if !hasanagram(j, okwords) {
-			word := okwords[j]
-			word.Word = anagram.SortLetters
+		word := *okWords[j]
+		if !hasAnagram(j, okWords) {
+			word.Word = sortLetters(word.Word)
 			word.Bytes = []byte{
-				anagram.SortLetters[0],
-				anagram.SortLetters[1],
-				anagram.SortLetters[2],
-				anagram.SortLetters[3],
-				anagram.SortLetters[4],
+				word.Word[0], word.Word[1], word.Word[2], word.Word[3], word.Word[4],
 			}
-			newokwords = append(newokwords, word)
+			newOkWords = append(newOkWords, &word)
+		}
+		anagram := Anagram{
+			Word:        okWords[j].Word,
+			SortLetters: word.Word,
 		}
 		anagrams = append(anagrams, anagram)
 	}
-	resultChannel <- newokwords
+	resultChannel <- newOkWords
 	anagramChannel <- anagrams
 }
 
-func finishWordlistWorker(resultChannel chan<- [][]Word, jobChannel <-chan int, okwords []Word) {
-	var newokwords [][]Word
+func assembleLeafWorker(resultChannel chan<- []*Node, jobChannel <-chan int, okWords []*Node) {
+	var checkedParentLeafCombo []*Node
 	for j := range jobChannel {
-		newokwords = append(newokwords, finishWordList(okwords[j:])...)
+		node := okWords[j]
+		node.LeafAdder(okWords[j:])
+		checkedParentLeafCombo = append(checkedParentLeafCombo, node)
 	}
-	resultChannel <- newokwords
+	resultChannel <- checkedParentLeafCombo
 }
 
-func finishWordList(okwords []Word) [][]Word {
-	word := okwords[0]
+func finishWordlistWorker(resultChannel chan<- [][]*Node, jobChannel <-chan int, okWords []*Node) {
+	var newOkWords [][]*Node
+	for j := range jobChannel {
+		newOkWords = append(newOkWords, finishWordList(okWords[j:])...)
+	}
+	resultChannel <- newOkWords
+}
+
+func finishWordList(okWords []*Node) [][]*Node {
+	word := okWords[0]
 	addedLetters := make(map[byte]bool)
 	addedLetters = addLetters(addedLetters, word.Bytes)
-	var foundcombinations [][]Word
-	index1 := 1
-	for i, word2 := range okwords[index1:] {
-		if !addableFunc(word2, word.Bytes[0], addedLetters) {
+	var foundCombinations [][]*Node
+	for _, word2 := range word.Leafs {
+		if !addableFunc(word2, addedLetters) {
 			continue
 		}
 		addedLetters = addLetters(addedLetters, word2.Bytes)
-		index2 := i + index1
-		for j, word3 := range okwords[index2:] {
-			if !addableFunc(word3, word2.Bytes[0], addedLetters) {
+		for _, word3 := range word2.Leafs {
+			if !addableFunc(word3, addedLetters) {
 				continue
 			}
 			addedLetters = addLetters(addedLetters, word3.Bytes)
-			index3 := j + index2
-			for k, word4 := range okwords[index3:] {
-				if !addableFunc(word4, word3.Bytes[0], addedLetters) {
+			for _, word4 := range word3.Leafs {
+				if !addableFunc(word4, addedLetters) {
 					continue
 				}
 				addedLetters = addLetters(addedLetters, word4.Bytes)
-				index4 := k + index3
-				for _, word5 := range okwords[index4:] {
-					if addableFunc(word5, word4.Bytes[0], addedLetters) {
-						foundcombinations = append(foundcombinations, []Word{
+				for _, word5 := range word4.Leafs {
+					if addableFunc(word5, addedLetters) {
+						foundCombinations = append(foundCombinations, []*Node{
 							word, word2, word3, word4, word5,
 						})
 					}
@@ -272,13 +300,10 @@ func finishWordList(okwords []Word) [][]Word {
 		}
 		addedLetters = removeLetters(addedLetters, word2.Bytes)
 	}
-	return foundcombinations
+	return foundCombinations
 }
 
-func addableFunc(word Word, prevword byte, addedLetters map[byte]bool) bool {
-	if word.Bytes[0] <= prevword {
-		return false
-	}
+func addableFunc(word *Node, addedLetters map[byte]bool) bool {
 	switch {
 	case addedLetters[word.Bytes[0]]:
 		return false
@@ -311,7 +336,7 @@ func sortLetters(word string) string {
 
 }
 
-func hasanagram(index int, words []Word) bool {
+func hasAnagram(index int, words []*Node) bool {
 	word := words[index]
 	for _, testWord := range words {
 		if word.Word == testWord.Word {
@@ -351,15 +376,7 @@ func removeLetters(letters map[byte]bool, word []byte) map[byte]bool {
 	return letters
 }
 
-func copyLetters(src map[byte]bool) map[byte]bool {
-	dst := make(map[byte]bool, len(src))
-	for k, v := range src {
-		dst[k] = v
-	}
-	return dst
-}
-
-func assembleSolutions(wordPairs [][]Word) [][]string {
+func assembleSolutions(wordPairs [][]*Node) [][]string {
 	solutions := [][]string{}
 	for _, pair := range wordPairs {
 		words := make([][]string, len(pair))
@@ -392,4 +409,21 @@ func assembleSolutions(wordPairs [][]Word) [][]string {
 		solutions[i] = solution
 	}
 	return solutions
+}
+
+func (n *Node) LeafAdder(nodes []*Node) {
+	for _, node := range nodes {
+		if n.isLeafOk(node) {
+			n.Leafs = append(n.Leafs, node)
+		}
+	}
+}
+
+func (n *Node) isLeafOk(node *Node) bool {
+	for _, letter := range node.Bytes {
+		if slices.Contains(n.Bytes, letter) {
+			return false
+		}
+	}
+	return true
 }
